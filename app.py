@@ -1,310 +1,110 @@
-# app.py - Complete Movie Recommendation Website with Improvements
+# app.py - Working Movie Recommendation Website
+from flask import Flask, render_template_string, request, session, redirect, url_for, flash, jsonify
+from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import json
 import sqlite3
-import requests
-from datetime import datetime, timedelta
+from datetime import timedelta
 from functools import wraps
-from flask import (
-    Flask, render_template_string, request, session, redirect, 
-    url_for, flash, jsonify, g
-)
-from werkzeug.security import generate_password_hash, check_password_hash
-from contextlib import closing
-
-# Configuration
-class Config:
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 'your-super-secret-key-change-this-in-production'
-    DATABASE = 'movies.db'
-    TMDB_API_KEY = os.environ.get('TMDB_API_KEY') or ''  # Get from https://www.themoviedb.org/settings/api
-    TMDB_BASE_URL = 'https://api.themoviedb.org/3'
-    TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500'
-    PERMANENT_SESSION_LIFETIME = timedelta(hours=24)
-    ITEMS_PER_PAGE = 12
 
 app = Flask(__name__)
-app.config.from_object(Config)
-app.permanent_session_lifetime = app.config['PERMANENT_SESSION_LIFETIME']
+app.secret_key = os.environ.get('SECRET_KEY', 'xstar-super-secret-key-2024')
+app.permanent_session_lifetime = timedelta(hours=24)
 
 # ==================== Database Setup ====================
 def init_db():
     """Initialize the database with tables."""
-    with closing(connect_db()) as db:
-        with app.open_resource('schema.sql', mode='r') as f:
-            db.cursor().executescript(f.read())
-        db.commit()
-
-def connect_db():
-    """Connect to the database."""
-    return sqlite3.connect(app.config['DATABASE'])
+    db_path = os.environ.get('DATABASE_PATH', 'movies.db')
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    
+    # Create users table
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    # Create favorites table
+    c.execute('''CREATE TABLE IF NOT EXISTS favorites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        movie_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        poster_path TEXT,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id),
+        UNIQUE(user_id, movie_id)
+    )''')
+    
+    # Add default admin user if not exists
+    try:
+        c.execute("INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+                 ('admin', 'admin@xstar.com', generate_password_hash('admin123')))
+        c.execute("INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+                 ('demo', 'demo@xstar.com', generate_password_hash('demo123')))
+    except sqlite3.IntegrityError:
+        pass  # Users already exist
+    
+    conn.commit()
+    conn.close()
 
 def get_db():
-    """Get database connection for the current request."""
-    db = getattr(g, '_database', None)
-    if db is None:
-        db = g._database = connect_db()
-        db.row_factory = sqlite3.Row
-    return db
+    """Get database connection."""
+    db_path = os.environ.get('DATABASE_PATH', 'movies.db')
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-@app.teardown_appcontext
-def close_connection(exception):
-    """Close database connection at the end of request."""
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
+# Initialize database on startup
+init_db()
 
-def query_db(query, args=(), one=False):
-    """Execute a database query and return results."""
-    cur = get_db().execute(query, args)
-    rv = cur.fetchall()
-    cur.close()
-    return (rv[0] if rv else None) if one else rv
+# ==================== Sample Movie Data ====================
+TRENDING_MOVIES = [
+    {"id": 1, "title": "Dune: Part Two", "year": "2024", "rating": 8.9, "poster": "🎬"},
+    {"id": 2, "title": "Deadpool 3", "year": "2024", "rating": 8.7, "poster": "🎬"},
+    {"id": 3, "title": "Kung Fu Panda 4", "year": "2024", "rating": 8.2, "poster": "🎬"},
+    {"id": 4, "title": "Godzilla x Kong", "year": "2024", "rating": 8.5, "poster": "🎬"},
+    {"id": 5, "title": "Inside Out 2", "year": "2024", "rating": 8.4, "poster": "🎬"},
+    {"id": 6, "title": "Joker: Folie à Deux", "year": "2024", "rating": 8.6, "poster": "🎬"},
+]
 
-def execute_db(query, args=()):
-    """Execute a database modification query."""
-    db = get_db()
-    cur = db.execute(query, args)
-    db.commit()
-    last_id = cur.lastrowid
-    cur.close()
-    return last_id
+POPULAR_MOVIES = [
+    {"id": 7, "title": "Oppenheimer", "year": "2023", "rating": 8.9, "poster": "🎬"},
+    {"id": 8, "title": "Barbie", "year": "2023", "rating": 7.8, "poster": "🎬"},
+    {"id": 9, "title": "The Marvels", "year": "2023", "rating": 7.2, "poster": "🎬"},
+    {"id": 10, "title": "Wonka", "year": "2023", "rating": 7.9, "poster": "🎬"},
+    {"id": 11, "title": "Napoleon", "year": "2023", "rating": 7.5, "poster": "🎬"},
+    {"id": 12, "title": "The Creator", "year": "2023", "rating": 7.8, "poster": "🎬"},
+]
+
+RECOMMENDED_MOVIES = [
+    {"id": 13, "title": "Inception", "year": "2010", "rating": 8.8, "poster": "🎬"},
+    {"id": 14, "title": "The Dark Knight", "year": "2008", "rating": 9.0, "poster": "🎬"},
+    {"id": 15, "title": "Interstellar", "year": "2014", "rating": 8.6, "poster": "🎬"},
+    {"id": 16, "title": "Pulp Fiction", "year": "1994", "rating": 8.9, "poster": "🎬"},
+]
 
 # ==================== Authentication Decorator ====================
 def login_required(f):
-    """Decorator to require login for routes."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
-            flash('Please log in to access this page.', 'warning')
+            flash('Please login to access this page.', 'warning')
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
-# ==================== TMDB API Helper Functions ====================
-def tmdb_request(endpoint, params=None):
-    """Make a request to TMDB API."""
-    if not app.config['TMDB_API_KEY']:
-        return None
-    
-    url = f"{app.config['TMDB_BASE_URL']}{endpoint}"
-    default_params = {
-        'api_key': app.config['TMDB_API_KEY'],
-        'language': 'en-US'
-    }
-    if params:
-        default_params.update(params)
-    
-    try:
-        response = requests.get(url, params=default_params, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except (requests.RequestException, ValueError) as e:
-        app.logger.error(f"TMDB API error: {e}")
-        return None
-
-def get_movie_details(movie_id):
-    """Get detailed information about a movie."""
-    data = tmdb_request(f'/movie/{movie_id}')
-    if data:
-        return {
-            'id': data.get('id'),
-            'title': data.get('title'),
-            'overview': data.get('overview'),
-            'poster_path': f"{app.config['TMDB_IMAGE_BASE']}{data.get('poster_path')}" if data.get('poster_path') else None,
-            'backdrop_path': f"{app.config['TMDB_IMAGE_BASE']}{data.get('backdrop_path')}" if data.get('backdrop_path') else None,
-            'release_date': data.get('release_date'),
-            'vote_average': data.get('vote_average'),
-            'vote_count': data.get('vote_count'),
-            'genres': [g['name'] for g in data.get('genres', [])],
-            'runtime': data.get('runtime'),
-            'tagline': data.get('tagline')
-        }
-    return None
-
-def search_movies_tmdb(query, page=1):
-    """Search for movies using TMDB API."""
-    data = tmdb_request('/search/movie', {'query': query, 'page': page})
-    if data:
-        movies = []
-        for movie in data.get('results', []):
-            movies.append({
-                'id': movie.get('id'),
-                'title': movie.get('title'),
-                'overview': movie.get('overview'),
-                'poster_path': f"{app.config['TMDB_IMAGE_BASE']}{movie.get('poster_path')}" if movie.get('poster_path') else None,
-                'release_date': movie.get('release_date'),
-                'vote_average': movie.get('vote_average')
-            })
-        return {
-            'results': movies,
-            'total_pages': data.get('total_pages', 1),
-            'total_results': data.get('total_results', 0)
-        }
-    return None
-
-def get_trending_movies(time_window='week', page=1):
-    """Get trending movies from TMDB."""
-    data = tmdb_request(f'/trending/movie/{time_window}', {'page': page})
-    if data:
-        movies = []
-        for movie in data.get('results', []):
-            movies.append({
-                'id': movie.get('id'),
-                'title': movie.get('title'),
-                'overview': movie.get('overview'),
-                'poster_path': f"{app.config['TMDB_IMAGE_BASE']}{movie.get('poster_path')}" if movie.get('poster_path') else None,
-                'release_date': movie.get('release_date'),
-                'vote_average': movie.get('vote_average')
-            })
-        return movies
-    return []
-
-def get_recommendations_tmdb(movie_id, page=1):
-    """Get movie recommendations from TMDB."""
-    data = tmdb_request(f'/movie/{movie_id}/recommendations', {'page': page})
-    if data:
-        movies = []
-        for movie in data.get('results', []):
-            movies.append({
-                'id': movie.get('id'),
-                'title': movie.get('title'),
-                'poster_path': f"{app.config['TMDB_IMAGE_BASE']}{movie.get('poster_path')}" if movie.get('poster_path') else None,
-                'vote_average': movie.get('vote_average')
-            })
-        return movies
-    return []
-
-def get_popular_movies(page=1):
-    """Get popular movies."""
-    data = tmdb_request('/movie/popular', {'page': page})
-    if data:
-        return [{
-            'id': m.get('id'),
-            'title': m.get('title'),
-            'poster_path': f"{app.config['TMDB_IMAGE_BASE']}{m.get('poster_path')}" if m.get('poster_path') else None,
-            'vote_average': m.get('vote_average')
-        } for m in data.get('results', [])]
-    return []
-
-def get_genres():
-    """Get list of movie genres."""
-    data = tmdb_request('/genre/movie/list')
-    if data:
-        return data.get('genres', [])
-    return []
-
-def discover_movies(genre_id=None, page=1):
-    """Discover movies by genre."""
-    params = {'page': page, 'sort_by': 'popularity.desc'}
-    if genre_id:
-        params['with_genres'] = genre_id
-    
-    data = tmdb_request('/discover/movie', params)
-    if data:
-        return [{
-            'id': m.get('id'),
-            'title': m.get('title'),
-            'poster_path': f"{app.config['TMDB_IMAGE_BASE']}{m.get('poster_path')}" if m.get('poster_path') else None,
-            'vote_average': m.get('vote_average')
-        } for m in data.get('results', [])]
-    return []
-
-# ==================== AI Recommendation Engine ====================
-class MovieRecommender:
-    """Simple AI-powered recommendation engine."""
-    
-    @staticmethod
-    def get_personalized_recommendations(user_id, limit=12):
-        """Get personalized recommendations based on user's favorites and watch history."""
-        # Get user's favorite movies
-        favorites = query_db(
-            "SELECT movie_id, title FROM favorites WHERE user_id = ? ORDER BY added_at DESC LIMIT 5",
-            [user_id]
-        )
-        
-        # Get user's watch history
-        watched = query_db(
-            "SELECT movie_id, title FROM watch_history WHERE user_id = ? ORDER BY watched_at DESC LIMIT 5",
-            [user_id]
-        )
-        
-        recommendations = []
-        seen_ids = set()
-        
-        # If user has favorites, get recommendations based on them
-        if favorites:
-            for fav in favorites[:3]:  # Use top 3 favorites
-                recs = get_recommendations_tmdb(fav['movie_id'])
-                if recs:
-                    for rec in recs[:4]:  # Get top 4 from each
-                        if rec['id'] not in seen_ids:
-                            seen_ids.add(rec['id'])
-                            recommendations.append(rec)
-        
-        # Add popular movies if we need more
-        if len(recommendations) < limit:
-            popular = get_popular_movies()
-            if popular:
-                for movie in popular:
-                    if movie['id'] not in seen_ids and len(recommendations) < limit:
-                        seen_ids.add(movie['id'])
-                        recommendations.append(movie)
-        
-        # Add trending movies to fill remaining slots
-        if len(recommendations) < limit:
-            trending = get_trending_movies()
-            for movie in trending:
-                if movie['id'] not in seen_ids and len(recommendations) < limit:
-                    seen_ids.add(movie['id'])
-                    recommendations.append(movie)
-        
-        return recommendations[:limit]
-    
-    @staticmethod
-    def get_similar_movies(movie_title, limit=6):
-        """Get similar movies based on a movie title."""
-        # First search for the movie to get its ID
-        search_result = search_movies_tmdb(movie_title)
-        if search_result and search_result['results']:
-            movie_id = search_result['results'][0]['id']
-            return get_recommendations_tmdb(movie_id)[:limit]
-        return []
-    
-    @staticmethod
-    def get_content_based_recommendations(genres, limit=12):
-        """Get recommendations based on preferred genres."""
-        if not genres:
-            return get_popular_movies(limit)
-        
-        all_movies = []
-        for genre_id in genres[:3]:  # Use top 3 genres
-            movies = discover_movies(genre_id)
-            all_movies.extend(movies[:limit//3])
-        
-        return all_movies[:limit]
-
 # ==================== Routes ====================
 @app.route('/')
 def index():
-    """Home page."""
-    # Get trending movies for display
-    trending = get_trending_movies()[:6]
-    popular = get_popular_movies()[:6]
-    
-    # Get personalized recommendations if logged in
-    personalized = []
-    favorites_list = []
-    if 'user_id' in session:
-        personalized = MovieRecommender.get_personalized_recommendations(session['user_id'], 6)
-        favorites_list = [f['movie_id'] for f in query_db(
-            "SELECT movie_id FROM favorites WHERE user_id = ?", [session['user_id']]
-        )]
-    
+    """Home page with movie recommendations."""
     return render_template_string(MAIN_PAGE_TEMPLATE, 
-                                trending=trending,
-                                popular=popular,
-                                personalized=personalized,
-                                favorites_list=favorites_list)
+                                trending=TRENDING_MOVIES,
+                                popular=POPULAR_MOVIES,
+                                recommended=RECOMMENDED_MOVIES)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -313,17 +113,15 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         
-        user = query_db(
-            "SELECT * FROM users WHERE username = ?", 
-            [username], 
-            one=True
-        )
+        conn = get_db()
+        user = conn.execute("SELECT * FROM users WHERE username = ?", [username]).fetchone()
+        conn.close()
         
         if user and check_password_hash(user['password_hash'], password):
             session.permanent = True
             session['user_id'] = user['id']
             session['username'] = user['username']
-            session['user'] = user['username']  # For template compatibility
+            session['user'] = user['username']
             flash('Successfully logged in!', 'success')
             return redirect(url_for('index'))
         else:
@@ -339,33 +137,28 @@ def register():
         password = request.form.get('password')
         email = request.form.get('email', '')
         
-        # Check if username exists
-        existing_user = query_db(
-            "SELECT id FROM users WHERE username = ?", 
-            [username], 
-            one=True
-        )
-        
-        if existing_user:
-            flash('Username already exists.', 'danger')
-        elif len(password) < 6:
+        if len(password) < 6:
             flash('Password must be at least 6 characters.', 'danger')
         else:
-            # Create new user
-            user_id = execute_db(
-                "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
-                [username, email, generate_password_hash(password)]
-            )
-            
-            if user_id:
+            conn = get_db()
+            try:
+                conn.execute(
+                    "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+                    [username, email, generate_password_hash(password)]
+                )
+                conn.commit()
+                user_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                conn.close()
+                
                 session.permanent = True
                 session['user_id'] = user_id
                 session['username'] = username
-                session['user'] = username  # For template compatibility
+                session['user'] = username
                 flash('Account created successfully!', 'success')
                 return redirect(url_for('index'))
-            else:
-                flash('Error creating account.', 'danger')
+            except sqlite3.IntegrityError:
+                flash('Username already exists.', 'danger')
+                conn.close()
     
     return render_template_string(REGISTER_PAGE_TEMPLATE)
 
@@ -379,245 +172,72 @@ def logout():
 @app.route('/search')
 def search():
     """Search page."""
-    query = request.args.get('q', '')
-    page = request.args.get('page', 1, type=int)
+    query = request.args.get('q', '').lower()
+    results = []
     
-    results = None
     if query:
-        results = search_movies_tmdb(query, page)
+        all_movies = TRENDING_MOVIES + POPULAR_MOVIES + RECOMMENDED_MOVIES
+        results = [m for m in all_movies if query in m['title'].lower()]
     
-    favorites_list = []
-    if 'user_id' in session:
-        favorites_list = [f['movie_id'] for f in query_db(
-            "SELECT movie_id FROM favorites WHERE user_id = ?", [session['user_id']]
-        )]
-    
-    return render_template_string(SEARCH_PAGE_TEMPLATE,
-                                query=query,
-                                results=results,
-                                page=page,
-                                favorites_list=favorites_list)
-
-@app.route('/movie/<int:movie_id>')
-def movie_details(movie_id):
-    """Movie details page."""
-    movie = get_movie_details(movie_id)
-    
-    if not movie:
-        flash('Movie not found.', 'danger')
-        return redirect(url_for('index'))
-    
-    # Get similar movies
-    similar = get_recommendations_tmdb(movie_id)[:6]
-    
-    # Check if in favorites
-    is_favorite = False
-    if 'user_id' in session:
-        fav = query_db(
-            "SELECT id FROM favorites WHERE user_id = ? AND movie_id = ?",
-            [session['user_id'], movie_id],
-            one=True
-        )
-        is_favorite = bool(fav)
-        
-        # Add to watch history
-        execute_db(
-            """INSERT OR REPLACE INTO watch_history (user_id, movie_id, title, watched_at) 
-               VALUES (?, ?, ?, ?)""",
-            [session['user_id'], movie_id, movie['title'], datetime.now().isoformat()]
-        )
-    
-    return render_template_string(MOVIE_DETAILS_TEMPLATE,
-                                movie=movie,
-                                similar=similar,
-                                is_favorite=is_favorite)
+    return render_template_string(SEARCH_PAGE_TEMPLATE, 
+                                query=query, 
+                                results=results)
 
 @app.route('/recommendations')
 def recommendations():
     """Recommendations page."""
-    page = request.args.get('page', 1, type=int)
-    recommendations_list = []
-    
-    if 'user_id' in session:
-        # Get personalized recommendations
-        recommendations_list = MovieRecommender.get_personalized_recommendations(
-            session['user_id'], 
-            app.config['ITEMS_PER_PAGE']
-        )
-    else:
-        # Get popular movies for non-logged in users
-        recommendations_list = get_popular_movies(page)
-    
-    favorites_list = []
-    if 'user_id' in session:
-        favorites_list = [f['movie_id'] for f in query_db(
-            "SELECT movie_id FROM favorites WHERE user_id = ?", [session['user_id']]
-        )]
-    
-    return render_template_string(RECOMMENDATIONS_PAGE_TEMPLATE,
-                                movies=recommendations_list,
-                                favorites_list=favorites_list)
-
-@app.route('/movies')
-def movies():
-    """All movies page."""
-    page = request.args.get('page', 1, type=int)
-    genre_id = request.args.get('genre', type=int)
-    
-    if genre_id:
-        movies_list = discover_movies(genre_id, page)
-    else:
-        movies_list = get_popular_movies(page)
-    
-    genres = get_genres()
-    
-    favorites_list = []
-    if 'user_id' in session:
-        favorites_list = [f['movie_id'] for f in query_db(
-            "SELECT movie_id FROM favorites WHERE user_id = ?", [session['user_id']]
-        )]
-    
-    return render_template_string(MOVIES_PAGE_TEMPLATE,
-                                movies=movies_list,
-                                genres=genres,
-                                selected_genre=genre_id,
-                                favorites_list=favorites_list)
-
-@app.route('/genres')
-def genres():
-    """Genres page."""
-    genres_list = get_genres()
-    return render_template_string(GENRES_PAGE_TEMPLATE, genres=genres_list)
+    return render_template_string(RECOMMENDATIONS_PAGE_TEMPLATE, 
+                                movies=RECOMMENDED_MOVIES + POPULAR_MOVIES[:6])
 
 @app.route('/trending')
 def trending():
     """Trending page."""
-    time_window = request.args.get('window', 'week')
-    page = request.args.get('page', 1, type=int)
-    
-    trending_movies = get_trending_movies(time_window, page)
-    
-    favorites_list = []
-    if 'user_id' in session:
-        favorites_list = [f['movie_id'] for f in query_db(
-            "SELECT movie_id FROM favorites WHERE user_id = ?", [session['user_id']]
-        )]
-    
-    return render_template_string(TRENDING_PAGE_TEMPLATE,
-                                movies=trending_movies,
-                                time_window=time_window,
-                                favorites_list=favorites_list)
+    return render_template_string(TRENDING_PAGE_TEMPLATE, 
+                                movies=TRENDING_MOVIES)
 
 @app.route('/favorites')
 @login_required
 def favorites():
     """User favorites page."""
-    user_favorites = query_db(
-        """SELECT f.*, f.added_at as added 
-           FROM favorites f 
-           WHERE f.user_id = ? 
-           ORDER BY f.added_at DESC""",
+    conn = get_db()
+    favorites = conn.execute(
+        "SELECT * FROM favorites WHERE user_id = ? ORDER BY added_at DESC",
         [session['user_id']]
-    )
+    ).fetchall()
+    conn.close()
     
-    # Fetch movie details for each favorite
-    favorites_with_details = []
-    for fav in user_favorites:
-        details = get_movie_details(fav['movie_id'])
-        if details:
-            details['added_at'] = fav['added']
-            favorites_with_details.append(details)
-    
-    return render_template_string(FAVORITES_PAGE_TEMPLATE,
-                                favorites=favorites_with_details)
+    return render_template_string(FAVORITES_PAGE_TEMPLATE, favorites=favorites)
 
 @app.route('/add_favorite', methods=['POST'])
 @login_required
 def add_favorite():
     """Add movie to favorites."""
     data = request.get_json()
-    movie_title = data.get('movie')
     movie_id = data.get('movie_id')
+    movie_title = data.get('movie')
     
-    if not movie_id and movie_title:
-        # Search for movie to get ID
-        search_result = search_movies_tmdb(movie_title)
-        if search_result and search_result['results']:
-            movie_id = search_result['results'][0]['id']
-            movie_title = search_result['results'][0]['title']
+    conn = get_db()
+    existing = conn.execute(
+        "SELECT id FROM favorites WHERE user_id = ? AND movie_id = ?",
+        [session['user_id'], movie_id]
+    ).fetchone()
     
-    if movie_id and movie_title:
-        # Check if already in favorites
-        existing = query_db(
-            "SELECT id FROM favorites WHERE user_id = ? AND movie_id = ?",
-            [session['user_id'], movie_id],
-            one=True
+    if existing:
+        conn.execute(
+            "DELETE FROM favorites WHERE user_id = ? AND movie_id = ?",
+            [session['user_id'], movie_id]
         )
-        
-        if existing:
-            # Remove from favorites
-            execute_db(
-                "DELETE FROM favorites WHERE user_id = ? AND movie_id = ?",
-                [session['user_id'], movie_id]
-            )
-            return jsonify({'success': True, 'message': f'Removed from favorites!', 'action': 'removed'})
-        else:
-            # Add to favorites
-            execute_db(
-                "INSERT INTO favorites (user_id, movie_id, title) VALUES (?, ?, ?)",
-                [session['user_id'], movie_id, movie_title]
-            )
-            return jsonify({'success': True, 'message': f'Added to favorites!', 'action': 'added'})
-    
-    return jsonify({'success': False, 'message': 'Movie not found.'}), 400
-
-@app.route('/profile')
-@login_required
-def profile():
-    """User profile page."""
-    user = query_db(
-        "SELECT * FROM users WHERE id = ?",
-        [session['user_id']],
-        one=True
-    )
-    
-    # Get user stats
-    favorites_count = query_db(
-        "SELECT COUNT(*) as count FROM favorites WHERE user_id = ?",
-        [session['user_id']],
-        one=True
-    )['count']
-    
-    watched_count = query_db(
-        "SELECT COUNT(DISTINCT movie_id) as count FROM watch_history WHERE user_id = ?",
-        [session['user_id']],
-        one=True
-    )['count']
-    
-    # Get recently watched
-    recent_watched = query_db(
-        "SELECT * FROM watch_history WHERE user_id = ? ORDER BY watched_at DESC LIMIT 10",
-        [session['user_id']]
-    )
-    
-    return render_template_string(PROFILE_PAGE_TEMPLATE,
-                                user=user,
-                                favorites_count=favorites_count,
-                                watched_count=watched_count,
-                                recent_watched=recent_watched)
-
-@app.route('/api/recommendations/<int:movie_id>')
-def api_recommendations(movie_id):
-    """API endpoint for movie recommendations."""
-    recommendations = get_recommendations_tmdb(movie_id)
-    return jsonify(recommendations)
-
-@app.route('/api/trending')
-def api_trending():
-    """API endpoint for trending movies."""
-    window = request.args.get('window', 'week')
-    movies = get_trending_movies(window)
-    return jsonify(movies)
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'message': 'Removed from favorites!', 'action': 'removed'})
+    else:
+        conn.execute(
+            "INSERT INTO favorites (user_id, movie_id, title) VALUES (?, ?, ?)",
+            [session['user_id'], movie_id, movie_title]
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'message': 'Added to favorites!', 'action': 'added'})
 
 # ==================== Error Handlers ====================
 @app.errorhandler(404)
@@ -633,10 +253,763 @@ def internal_error(error):
                                 error_message="Internal Server Error"), 500
 
 # ==================== Templates ====================
-# (Previous MAIN_PAGE_TEMPLATE, LOGIN_PAGE_TEMPLATE, REGISTER_PAGE_TEMPLATE remain the same)
-# Adding new templates for the new routes
+MAIN_PAGE_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>X★STAR - AI Movie Recommendations</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0c0c0c 0%, #1a1a2e 50%, #16213e 100%);
+            color: white;
+            min-height: 100vh;
+        }
+        
+        /* Header Styles */
+        .header {
+            position: relative;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            overflow: hidden;
+            padding: 2rem;
+        }
+        
+        .bg-animation {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: 
+                radial-gradient(circle at 20% 80%, rgba(120,119,198,0.3) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(255,119,198,0.3) 0%, transparent 50%),
+                radial-gradient(circle at 40% 40%, rgba(120,219,255,0.2) 0%, transparent 50%);
+            animation: bgShift 20s ease infinite;
+            z-index: -1;
+        }
+        
+        @keyframes bgShift {
+            0%, 100% { transform: scale(1) rotate(0deg); }
+            50% { transform: scale(1.1) rotate(180deg); }
+        }
+        
+        .logo {
+            font-size: 5rem; 
+            font-weight: bold;
+            background: linear-gradient(45deg, #00d4ff, #ff6b9d, #ffd93d, #00ff88);
+            -webkit-background-clip: text; 
+            -webkit-text-fill-color: transparent;
+            background-clip: text; 
+            margin-bottom: 1rem;
+            text-shadow: 0 0 40px rgba(0,212,255,0.6);
+            animation: logoGlow 2.5s ease-in-out infinite alternate;
+        }
+        
+        @keyframes logoGlow {
+            from { filter: drop-shadow(0 0 30px #00d4ff); transform: scale(1); }
+            to { filter: drop-shadow(0 0 40px #ffd93d); transform: scale(1.05); }
+        }
+        
+        .tagline { 
+            font-size: 1.8rem; 
+            margin-bottom: 2.5rem; 
+            opacity: 0.95; 
+            animation: fadeInUp 1s ease 0.5s both; 
+        }
+        
+        @keyframes fadeInUp { 
+            from { opacity: 0; transform: translateY(30px); } 
+            to { opacity: 0.95; transform: translateY(0); } 
+        }
+        
+        /* Navigation */
+        .nav-links { 
+            display: flex; 
+            gap: 2rem; 
+            list-style: none; 
+            margin-bottom: 2rem; 
+            animation: fadeInUp 1s ease 0.2s both;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        
+        .nav-links a {
+            color: rgba(255,255,255,0.9); 
+            text-decoration: none; 
+            font-weight: 600; 
+            padding: 0.8rem 1.5rem;
+            border-radius: 30px; 
+            transition: all 0.3s ease; 
+            backdrop-filter: blur(10px);
+            background: rgba(255,255,255,0.05);
+        }
+        
+        .nav-links a:hover { 
+            background: rgba(0,212,255,0.2); 
+            color: #00d4ff; 
+            transform: translateY(-3px); 
+            box-shadow: 0 10px 25px rgba(0,212,255,0.3); 
+        }
+        
+        /* User Section */
+        .user-section { 
+            position: absolute; 
+            top: 2rem; 
+            right: 2rem; 
+            display: flex; 
+            gap: 1rem; 
+            align-items: center;
+            z-index: 10;
+        }
+        
+        .user-btn { 
+            background: rgba(0,212,255,0.2); 
+            padding: 0.8rem 1.5rem; 
+            border-radius: 25px; 
+            text-decoration: none; 
+            color: white; 
+            font-weight: 600; 
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+        
+        .user-btn:hover { 
+            background: rgba(0,212,255,0.4); 
+            transform: translateY(-2px); 
+        }
+        
+        /* Search Container */
+        .search-container {
+            width: 65%; 
+            max-width: 700px; 
+            margin-bottom: 2rem; 
+            animation: fadeInUp 1s ease 0.8s both;
+            position: relative;
+        }
+        
+        .search-box {
+            width: 100%; 
+            padding: 1.2rem 2rem; 
+            font-size: 1.1rem; 
+            border: 2px solid rgba(0,212,255,0.3);
+            border-radius: 50px; 
+            background: rgba(255,255,255,0.95); 
+            box-shadow: 0 15px 40px rgba(0,0,0,0.4);
+            outline: none; 
+            transition: all 0.4s ease; 
+            color: #333; 
+            backdrop-filter: blur(10px);
+        }
+        
+        .search-box:focus { 
+            border-color: #00d4ff; 
+            transform: scale(1.02); 
+            box-shadow: 0 20px 50px rgba(0,212,255,0.3); 
+        }
+        
+        .search-btn {
+            position: absolute; 
+            right: 5px; 
+            top: 50%; 
+            transform: translateY(-50%);
+            background: linear-gradient(45deg, #00d4ff, #ff6b9d); 
+            border: none; 
+            padding: 0.8rem 1.8rem;
+            border-radius: 50px; 
+            color: white; 
+            font-weight: bold; 
+            font-size: 1rem; 
+            cursor: pointer;
+            transition: all 0.3s ease; 
+            box-shadow: 0 5px 20px rgba(0,212,255,0.4);
+        }
+        
+        .search-btn:hover { 
+            transform: translateY(-50%) scale(1.05); 
+            box-shadow: 0 10px 30px rgba(0,212,255,0.6); 
+        }
+        
+        /* Features */
+        .features { 
+            display: flex; 
+            gap: 3rem; 
+            margin-top: 2rem;
+            animation: fadeInUp 1s ease 1s both;
+        }
+        
+        .feature-item { 
+            text-align: center; 
+            color: #ccc; 
+        }
+        
+        .feature-item strong { 
+            display: block; 
+            font-size: 1.2rem; 
+            color: #00d4ff; 
+            margin-bottom: 0.3rem; 
+        }
+        
+        /* Content Sections */
+        .content { 
+            padding: 4rem 2rem; 
+            max-width: 1200px; 
+            margin: 0 auto; 
+        }
+        
+        .section-title {
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+            background: linear-gradient(45deg, #00d4ff, #ff6b9d);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .movies-grid {
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); 
+            gap: 2rem; 
+            margin-bottom: 3rem;
+        }
+        
+        .movie-card {
+            background: rgba(255,255,255,0.1); 
+            border-radius: 15px; 
+            padding: 1.5rem; 
+            text-align: center;
+            backdrop-filter: blur(10px); 
+            border: 1px solid rgba(255,255,255,0.2); 
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .movie-card:hover { 
+            transform: translateY(-10px); 
+            box-shadow: 0 20px 40px rgba(0,212,255,0.3); 
+        }
+        
+        .movie-poster {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+        
+        .movie-title { 
+            font-size: 1.2rem; 
+            font-weight: bold; 
+            margin-bottom: 0.5rem; 
+            color: #00d4ff; 
+        }
+        
+        .movie-year {
+            color: #ccc;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .movie-rating {
+            color: #ffd93d;
+            font-weight: bold;
+            margin-bottom: 1rem;
+        }
+        
+        .favorite-btn {
+            background: rgba(255,107,157,0.3);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+        
+        .favorite-btn:hover {
+            background: rgba(255,107,157,0.6);
+            transform: scale(1.05);
+        }
+        
+        /* Flash Messages */
+        .flash-messages {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            max-width: 400px;
+        }
+        
+        .flash {
+            padding: 1rem 2rem;
+            border-radius: 10px;
+            margin-bottom: 1rem;
+            animation: slideDown 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+        
+        .flash.success {
+            background: rgba(0,255,136,0.2);
+            border: 1px solid #00ff88;
+            color: #00ff88;
+        }
+        
+        .flash.danger {
+            background: rgba(255,107,157,0.2);
+            border: 1px solid #ff6b9d;
+            color: #ff6b9d;
+        }
+        
+        .flash.warning {
+            background: rgba(255,217,61,0.2);
+            border: 1px solid #ffd93d;
+            color: #ffd93d;
+        }
+        
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .logo { font-size: 3rem; } 
+            .tagline { font-size: 1.2rem; }
+            .search-container { width: 95%; } 
+            .nav-links { gap: 0.5rem; }
+            .features { flex-direction: column; gap: 1rem; } 
+            .user-section { top: 1rem; right: 1rem; flex-direction: column; }
+            .section-title { font-size: 2rem; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <div class="flash-messages">
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endwith %}
 
-SEARCH_PAGE_TEMPLATE = """
+    <!-- Hero Section -->
+    <div class="header">
+        <div class="bg-animation"></div>
+        
+        <div class="user-section">
+            {% if session.user %}
+                <a href="/favorites" class="user-btn">⭐ {{ session.user }}'s Favorites</a>
+                <a href="/logout" class="user-btn">Logout</a>
+            {% else %}
+                <a href="/login" class="user-btn">Login</a>
+                <a href="/register" class="user-btn">Register</a>
+            {% endif %}
+        </div>
+        
+        <ul class="nav-links">
+            <li><a href="/">🏠 Home</a></li>
+            <li><a href="/recommendations">🎯 Recommendations</a></li>
+            <li><a href="/trending">🔥 Trending</a></li>
+            <li><a href="/search">🔍 Search</a></li>
+        </ul>
+
+        <div class="logo">X★STAR</div>
+        <div class="tagline">Your AI Movie Recommendation Engine</div>
+        
+        <div class="search-container">
+            <input type="text" class="search-box" placeholder="Search for movies..." id="searchInput">
+            <button class="search-btn" onclick="performSearch()">🔍 Find Movies</button>
+        </div>
+
+        <div class="features">
+            <div class="feature-item"><strong>10M+</strong> Movies</div>
+            <div class="feature-item"><strong>AI Powered</strong> Matches</div>
+            <div class="feature-item"><strong>Free Forever</strong></div>
+        </div>
+    </div>
+
+    <!-- Content Sections -->
+    <div class="content">
+        <!-- Trending Section -->
+        <h2 class="section-title">🔥 Trending Now</h2>
+        <div class="movies-grid">
+            {% for movie in trending %}
+            <div class="movie-card" onclick="viewMovie({{ movie.id }})">
+                <div class="movie-poster">{{ movie.poster }}</div>
+                <div class="movie-title">{{ movie.title }}</div>
+                <div class="movie-year">{{ movie.year }}</div>
+                <div class="movie-rating">⭐ {{ movie.rating }}/10</div>
+                <button class="favorite-btn" onclick="event.stopPropagation(); toggleFavorite({{ movie.id }}, '{{ movie.title }}')">
+                    💖 Save
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <!-- Popular Section -->
+        <h2 class="section-title">🎬 Popular Movies</h2>
+        <div class="movies-grid">
+            {% for movie in popular %}
+            <div class="movie-card" onclick="viewMovie({{ movie.id }})">
+                <div class="movie-poster">{{ movie.poster }}</div>
+                <div class="movie-title">{{ movie.title }}</div>
+                <div class="movie-year">{{ movie.year }}</div>
+                <div class="movie-rating">⭐ {{ movie.rating }}/10</div>
+                <button class="favorite-btn" onclick="event.stopPropagation(); toggleFavorite({{ movie.id }}, '{{ movie.title }}')">
+                    💖 Save
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <!-- Recommended Section -->
+        <h2 class="section-title">✨ Recommended For You</h2>
+        <div class="movies-grid">
+            {% for movie in recommended %}
+            <div class="movie-card" onclick="viewMovie({{ movie.id }})">
+                <div class="movie-poster">{{ movie.poster }}</div>
+                <div class="movie-title">{{ movie.title }}</div>
+                <div class="movie-year">{{ movie.year }}</div>
+                <div class="movie-rating">⭐ {{ movie.rating }}/10</div>
+                <button class="favorite-btn" onclick="event.stopPropagation(); toggleFavorite({{ movie.id }}, '{{ movie.title }}')">
+                    💖 Save
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <script>
+        function performSearch() {
+            const query = document.getElementById('searchInput').value;
+            if (query.trim()) {
+                window.location.href = `/search?q=${encodeURIComponent(query)}`;
+            }
+        }
+        
+        document.getElementById('searchInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') performSearch();
+        });
+        
+        function toggleFavorite(movieId, movieTitle) {
+            fetch('/add_favorite', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({movie_id: movieId, movie: movieTitle})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    alert(data.message);
+                } else {
+                    alert('Please login to save favorites');
+                    window.location.href = '/login';
+                }
+            });
+        }
+        
+        function viewMovie(movieId) {
+            alert('Movie details coming soon! ID: ' + movieId);
+        }
+    </script>
+</body>
+</html>
+'''
+
+LOGIN_PAGE_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - X★STAR</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-container {
+            background: rgba(255,255,255,0.95);
+            padding: 3rem;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+            width: 100%; 
+            max-width: 400px;
+            backdrop-filter: blur(10px);
+        }
+        .logo { 
+            text-align: center; 
+            font-size: 2.5rem; 
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 2rem;
+            font-weight: bold;
+        }
+        h2 {
+            text-align: center;
+            margin-bottom: 2rem;
+            color: #333;
+        }
+        .form-group { margin-bottom: 1.5rem; }
+        .form-group label { 
+            display: block; 
+            margin-bottom: 0.5rem; 
+            color: #333; 
+            font-weight: 600; 
+        }
+        .form-group input {
+            width: 100%; 
+            padding: 1rem; 
+            border: 2px solid #e1e5e9; 
+            border-radius: 10px;
+            font-size: 1rem; 
+            transition: all 0.3s ease; 
+            outline: none;
+        }
+        .form-group input:focus { 
+            border-color: #667eea; 
+            box-shadow: 0 0 0 3px rgba(102,126,234,0.1); 
+        }
+        .btn {
+            width: 100%; 
+            padding: 1rem; 
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white; 
+            border: none; 
+            border-radius: 10px; 
+            font-size: 1.1rem;
+            font-weight: 600; 
+            cursor: pointer; 
+            transition: all 0.3s ease;
+        }
+        .btn:hover { 
+            transform: translateY(-2px); 
+            box-shadow: 0 10px 20px rgba(102,126,234,0.3); 
+        }
+        .links { 
+            text-align: center; 
+            margin-top: 1.5rem; 
+        }
+        .links a { 
+            color: #667eea; 
+            text-decoration: none; 
+            font-weight: 600; 
+        }
+        .flash {
+            padding: 1rem;
+            border-radius: 10px;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        .flash.danger {
+            background: rgba(231,76,60,0.1);
+            color: #e74c3c;
+            border: 1px solid #e74c3c;
+        }
+        .flash.success {
+            background: rgba(46,204,113,0.1);
+            color: #27ae60;
+            border: 1px solid #27ae60;
+        }
+        .demo-credentials {
+            background: rgba(102,126,234,0.1);
+            padding: 1rem;
+            border-radius: 10px;
+            margin-top: 1rem;
+            text-align: center;
+            color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">X★STAR</div>
+        <h2>Welcome Back</h2>
+        
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        
+        <form method="POST">
+            <div class="form-group">
+                <label>Username</label>
+                <input type="text" name="username" required autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" name="password" required autocomplete="current-password">
+            </div>
+            <button type="submit" class="btn">Login</button>
+        </form>
+        
+        <div class="demo-credentials">
+            <strong>Demo Credentials:</strong><br>
+            Username: demo | Password: demo123<br>
+            Username: admin | Password: admin123
+        </div>
+        
+        <div class="links">
+            <p>Don't have an account? <a href="/register">Register here</a></p>
+            <p><a href="/">← Back to Home</a></p>
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+REGISTER_PAGE_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register - X★STAR</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .register-container {
+            background: rgba(255,255,255,0.95);
+            padding: 3rem;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+            width: 100%; 
+            max-width: 400px;
+            backdrop-filter: blur(10px);
+        }
+        .logo { 
+            text-align: center; 
+            font-size: 2.5rem; 
+            background: linear-gradient(45deg, #f093fb, #f5576c);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 2rem;
+            font-weight: bold;
+        }
+        h2 {
+            text-align: center;
+            margin-bottom: 2rem;
+            color: #333;
+        }
+        .form-group { margin-bottom: 1.5rem; }
+        .form-group label { 
+            display: block; 
+            margin-bottom: 0.5rem; 
+            color: #333; 
+            font-weight: 600; 
+        }
+        .form-group input {
+            width: 100%; 
+            padding: 1rem; 
+            border: 2px solid #e1e5e9; 
+            border-radius: 10px;
+            font-size: 1rem; 
+            transition: all 0.3s ease; 
+            outline: none;
+        }
+        .form-group input:focus { 
+            border-color: #f5576c; 
+            box-shadow: 0 0 0 3px rgba(245,87,108,0.1); 
+        }
+        .btn {
+            width: 100%; 
+            padding: 1rem; 
+            background: linear-gradient(45deg, #f093fb, #f5576c);
+            color: white; 
+            border: none; 
+            border-radius: 10px; 
+            font-size: 1.1rem;
+            font-weight: 600; 
+            cursor: pointer; 
+            transition: all 0.3s ease;
+        }
+        .btn:hover { 
+            transform: translateY(-2px); 
+            box-shadow: 0 10px 20px rgba(245,87,108,0.3); 
+        }
+        .links { 
+            text-align: center; 
+            margin-top: 1.5rem; 
+        }
+        .links a { 
+            color: #f5576c; 
+            text-decoration: none; 
+            font-weight: 600; 
+        }
+        .flash {
+            padding: 1rem;
+            border-radius: 10px;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        .flash.danger {
+            background: rgba(231,76,60,0.1);
+            color: #e74c3c;
+            border: 1px solid #e74c3c;
+        }
+    </style>
+</head>
+<body>
+    <div class="register-container">
+        <div class="logo">X★STAR</div>
+        <h2>Create Account</h2>
+        
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        
+        <form method="POST">
+            <div class="form-group">
+                <label>Username</label>
+                <input type="text" name="username" required autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label>Email (Optional)</label>
+                <input type="email" name="email" autocomplete="email">
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" name="password" required autocomplete="new-password" minlength="6">
+            </div>
+            <button type="submit" class="btn">Register</button>
+        </form>
+        
+        <div class="links">
+            <p>Already have an account? <a href="/login">Login here</a></p>
+            <p><a href="/">← Back to Home</a></p>
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+SEARCH_PAGE_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -653,44 +1026,88 @@ SEARCH_PAGE_TEMPLATE = """
         }
         .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
         .header {
-            display: flex; justify-content: space-between; align-items: center;
-            padding: 1rem 0; margin-bottom: 2rem; border-bottom: 1px solid rgba(255,255,255,0.1);
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+            padding: 1rem 0; 
+            margin-bottom: 2rem; 
+            border-bottom: 1px solid rgba(255,255,255,0.1);
         }
-        .logo { font-size: 2rem; font-weight: bold; color: #00d4ff; text-decoration: none; }
+        .logo { 
+            font-size: 2rem; 
+            font-weight: bold; 
+            background: linear-gradient(45deg, #00d4ff, #ff6b9d);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-decoration: none; 
+        }
         .search-box-container { flex: 1; max-width: 500px; margin: 0 2rem; }
         .search-box {
-            width: 100%; padding: 0.8rem 1.5rem; border-radius: 25px;
-            border: none; background: rgba(255,255,255,0.1); color: white;
+            width: 100%; 
+            padding: 0.8rem 1.5rem; 
+            border-radius: 25px;
+            border: 2px solid rgba(0,212,255,0.3);
+            background: rgba(255,255,255,0.1); 
+            color: white;
             font-size: 1rem;
         }
-        .search-box:focus { outline: 2px solid #00d4ff; background: rgba(255,255,255,0.15); }
+        .search-box:focus { 
+            outline: none; 
+            border-color: #00d4ff;
+            background: rgba(255,255,255,0.15); 
+        }
         .movies-grid {
-            display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 1.5rem; margin-top: 2rem;
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1.5rem; 
+            margin-top: 2rem;
         }
         .movie-card {
-            background: rgba(255,255,255,0.1); border-radius: 10px; overflow: hidden;
-            transition: transform 0.3s ease; cursor: pointer;
+            background: rgba(255,255,255,0.1); 
+            border-radius: 10px; 
+            overflow: hidden;
+            transition: transform 0.3s ease; 
+            cursor: pointer;
+            padding: 1.5rem;
+            text-align: center;
         }
-        .movie-card:hover { transform: translateY(-5px); box-shadow: 0 10px 30px rgba(0,212,255,0.2); }
+        .movie-card:hover { 
+            transform: translateY(-5px); 
+            box-shadow: 0 10px 30px rgba(0,212,255,0.2); 
+        }
         .movie-poster {
-            width: 100%; height: 300px; object-fit: cover;
-            background: linear-gradient(45deg, #1a1a2e, #16213e);
+            font-size: 3rem;
+            margin-bottom: 1rem;
         }
-        .movie-info { padding: 1rem; }
-        .movie-title { font-size: 1.1rem; font-weight: bold; margin-bottom: 0.5rem; }
-        .movie-meta { font-size: 0.9rem; color: #aaa; display: flex; justify-content: space-between; }
-        .pagination { display: flex; justify-content: center; gap: 0.5rem; margin-top: 2rem; }
-        .page-link {
-            padding: 0.5rem 1rem; background: rgba(255,255,255,0.1);
-            color: white; text-decoration: none; border-radius: 5px;
+        .movie-title { 
+            font-size: 1.1rem; 
+            font-weight: bold; 
+            margin-bottom: 0.5rem;
+            color: #00d4ff;
         }
-        .page-link:hover { background: #00d4ff; color: #0c0c0c; }
-        .favorite-btn {
-            background: none; border: none; color: #ff6b9d; cursor: pointer;
-            font-size: 1.2rem; padding: 0.2rem 0.5rem;
+        .movie-meta { 
+            font-size: 0.9rem; 
+            color: #aaa; 
+            margin-bottom: 1rem;
         }
-        .favorite-btn.active { color: #ffd93d; }
+        .btn {
+            background: rgba(0,212,255,0.2);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .btn:hover {
+            background: rgba(0,212,255,0.4);
+        }
+        .back-btn {
+            display: inline-block;
+            margin-top: 2rem;
+            color: #00d4ff;
+            text-decoration: none;
+        }
     </style>
 </head>
 <body>
@@ -703,8 +1120,7 @@ SEARCH_PAGE_TEMPLATE = """
             </div>
             <div>
                 {% if session.user %}
-                    <a href="/favorites" style="color: #00d4ff; margin-right: 1rem;">⭐ Favorites</a>
-                    <a href="/profile" style="color: white;">👤 {{ session.user }}</a>
+                    <span>👤 {{ session.user }}</span>
                 {% else %}
                     <a href="/login" style="color: #00d4ff;">Login</a>
                 {% endif %}
@@ -713,43 +1129,27 @@ SEARCH_PAGE_TEMPLATE = """
         
         <h1>Search Results for "{{ query }}"</h1>
         
-        {% if results and results.results %}
-            <p>Found {{ results.total_results }} movies</p>
+        {% if results %}
+            <p>Found {{ results|length }} movies</p>
             <div class="movies-grid">
-                {% for movie in results.results %}
-                <div class="movie-card" onclick="location.href='/movie/{{ movie.id }}'">
-                    {% if movie.poster_path %}
-                    <img src="{{ movie.poster_path }}" alt="{{ movie.title }}" class="movie-poster">
-                    {% else %}
-                    <div class="movie-poster" style="display: flex; align-items: center; justify-content: center;">
-                        🎬 No Image
+                {% for movie in results %}
+                <div class="movie-card">
+                    <div class="movie-poster">{{ movie.poster }}</div>
+                    <div class="movie-title">{{ movie.title }}</div>
+                    <div class="movie-meta">
+                        {{ movie.year }} • ⭐ {{ movie.rating }}
                     </div>
-                    {% endif %}
-                    <div class="movie-info">
-                        <div class="movie-title">{{ movie.title }}</div>
-                        <div class="movie-meta">
-                            <span>⭐ {{ "%.1f"|format(movie.vote_average) if movie.vote_average else 'N/A' }}</span>
-                            <span>{{ movie.release_date[:4] if movie.release_date else 'N/A' }}</span>
-                        </div>
-                        <button class="favorite-btn {% if movie.id in favorites_list %}active{% endif %}" 
-                                onclick="event.stopPropagation(); toggleFavorite({{ movie.id }}, '{{ movie.title }}')">
-                            {% if movie.id in favorites_list %}❤️{% else %}🤍{% endif %}
-                        </button>
-                    </div>
+                    <button class="btn" onclick="addToFavorites({{ movie.id }}, '{{ movie.title }}')">
+                        💖 Save to Favorites
+                    </button>
                 </div>
                 {% endfor %}
             </div>
-            
-            {% if results.total_pages > 1 %}
-            <div class="pagination">
-                {% for p in range(1, min(results.total_pages, 10) + 1) %}
-                <a href="?q={{ query }}&page={{ p }}" class="page-link">{{ p }}</a>
-                {% endfor %}
-            </div>
-            {% endif %}
         {% else %}
             <p>No results found for "{{ query }}"</p>
         {% endif %}
+        
+        <a href="/" class="back-btn">← Back to Home</a>
     </div>
     
     <script>
@@ -759,29 +1159,34 @@ SEARCH_PAGE_TEMPLATE = """
             }
         });
         
-        function toggleFavorite(movieId, movieTitle) {
+        function addToFavorites(movieId, movieTitle) {
             fetch('/add_favorite', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({movie_id: movieId, movie: movieTitle})
-            }).then(res => res.json()).then(data => {
+            })
+            .then(res => res.json())
+            .then(data => {
                 if (data.success) {
-                    location.reload();
+                    alert(data.message);
+                } else {
+                    alert('Please login to save favorites');
+                    window.location.href = '/login';
                 }
             });
         }
     </script>
 </body>
 </html>
-"""
+'''
 
-MOVIE_DETAILS_TEMPLATE = """
+RECOMMENDATIONS_PAGE_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ movie.title }} - X★STAR</title>
+    <title>Recommendations - X★STAR</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -790,159 +1195,401 @@ MOVIE_DETAILS_TEMPLATE = """
             color: white;
             min-height: 100vh;
         }
-        .backdrop {
-            position: relative; height: 500px; overflow: hidden;
+        .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+        .header {
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+            padding: 1rem 0; 
+            margin-bottom: 2rem; 
+            border-bottom: 1px solid rgba(255,255,255,0.1);
         }
-        .backdrop-image {
-            width: 100%; height: 100%; object-fit: cover; opacity: 0.4;
-        }
-        .backdrop-overlay {
-            position: absolute; bottom: 0; left: 0; right: 0;
-            background: linear-gradient(transparent, #0c0c0c);
-            padding: 4rem 2rem 2rem;
-        }
-        .container { max-width: 1200px; margin: 0 auto; padding: 0 2rem; }
-        .movie-header {
-            display: flex; gap: 2rem; margin-top: -150px; position: relative;
-        }
-        .poster {
-            width: 300px; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
-        }
-        .movie-info { flex: 1; padding-top: 2rem; }
-        .movie-title { font-size: 3rem; margin-bottom: 1rem; }
-        .movie-meta { display: flex; gap: 2rem; margin-bottom: 1.5rem; color: #ccc; }
-        .genres { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
-        .genre-tag {
-            background: rgba(0,212,255,0.2); padding: 0.5rem 1rem;
-            border-radius: 20px; font-size: 0.9rem;
-        }
-        .overview { font-size: 1.1rem; line-height: 1.8; margin-bottom: 2rem; opacity: 0.9; }
-        .actions { display: flex; gap: 1rem; }
-        .btn {
-            padding: 1rem 2rem; border-radius: 10px; text-decoration: none;
-            font-weight: bold; transition: all 0.3s ease; border: none; cursor: pointer;
-            font-size: 1rem;
-        }
-        .btn-primary {
+        .logo { 
+            font-size: 2rem; 
+            font-weight: bold; 
             background: linear-gradient(45deg, #00d4ff, #ff6b9d);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-decoration: none; 
+        }
+        h1 {
+            margin-bottom: 2rem;
+            background: linear-gradient(45deg, #00d4ff, #ff6b9d);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .movies-grid {
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1.5rem; 
+        }
+        .movie-card {
+            background: rgba(255,255,255,0.1); 
+            border-radius: 10px; 
+            padding: 1.5rem;
+            text-align: center;
+            transition: transform 0.3s ease; 
+            cursor: pointer;
+        }
+        .movie-card:hover { 
+            transform: translateY(-5px); 
+            box-shadow: 0 10px 30px rgba(0,212,255,0.2); 
+        }
+        .movie-poster { font-size: 3rem; margin-bottom: 1rem; }
+        .movie-title { 
+            font-size: 1.1rem; 
+            font-weight: bold; 
+            margin-bottom: 0.5rem;
+            color: #00d4ff;
+        }
+        .btn {
+            background: rgba(255,107,157,0.3);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
             color: white;
+            cursor: pointer;
+            margin-top: 0.5rem;
         }
-        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 10px 30px rgba(0,212,255,0.3); }
-        .btn-secondary {
-            background: rgba(255,255,255,0.1); color: white;
-        }
-        .btn-secondary:hover { background: rgba(255,255,255,0.2); }
-        .section { margin: 3rem 0; }
-        .section-title { font-size: 2rem; margin-bottom: 1.5rem; color: #00d4ff; }
-        .similar-grid {
-            display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-            gap: 1.5rem;
-        }
-        .similar-card {
-            background: rgba(255,255,255,0.1); border-radius: 10px; overflow: hidden;
-            cursor: pointer; transition: transform 0.3s ease;
-        }
-        .similar-card:hover { transform: translateY(-5px); }
-        .similar-poster {
-            width: 100%; height: 250px; object-fit: cover;
-        }
-        .similar-title { padding: 1rem; font-size: 1rem; }
-        
-        @media (max-width: 768px) {
-            .movie-header { flex-direction: column; align-items: center; }
-            .poster { width: 200px; }
-            .movie-title { font-size: 2rem; text-align: center; }
+        .btn:hover { background: rgba(255,107,157,0.6); }
+        .back-btn {
+            display: inline-block;
+            margin-top: 2rem;
+            color: #00d4ff;
+            text-decoration: none;
         }
     </style>
 </head>
 <body>
-    <div class="backdrop">
-        {% if movie.backdrop_path %}
-        <img src="{{ movie.backdrop_path }}" alt="{{ movie.title }}" class="backdrop-image">
-        {% else %}
-        <div class="backdrop-image" style="background: linear-gradient(45deg, #1a1a2e, #16213e);"></div>
-        {% endif %}
-        <div class="backdrop-overlay">
-            <div class="container">
-                <a href="/" style="color: white; text-decoration: none;">← Back</a>
-            </div>
-        </div>
-    </div>
-    
     <div class="container">
-        <div class="movie-header">
-            {% if movie.poster_path %}
-            <img src="{{ movie.poster_path }}" alt="{{ movie.title }}" class="poster">
-            {% else %}
-            <div class="poster" style="background: linear-gradient(45deg, #1a1a2e, #16213e); height: 450px; display: flex; align-items: center; justify-content: center;">
-                🎬 No Poster
-            </div>
-            {% endif %}
-            
-            <div class="movie-info">
-                <h1 class="movie-title">{{ movie.title }}</h1>
-                {% if movie.tagline %}
-                <p style="font-style: italic; margin-bottom: 1rem; opacity: 0.8;">"{{ movie.tagline }}"</p>
+        <div class="header">
+            <a href="/" class="logo">X★STAR</a>
+            <div>
+                {% if session.user %}
+                    <span>👤 {{ session.user }}</span>
+                {% else %}
+                    <a href="/login" style="color: #00d4ff;">Login</a>
                 {% endif %}
-                
-                <div class="movie-meta">
-                    <span>⭐ {{ "%.1f"|format(movie.vote_average) if movie.vote_average else 'N/A' }}/10</span>
-                    <span>🗳️ {{ movie.vote_count }} votes</span>
-                    <span>📅 {{ movie.release_date[:4] if movie.release_date else 'N/A' }}</span>
-                    <span>⏱️ {{ movie.runtime }} min</span>
-                </div>
-                
-                <div class="genres">
-                    {% for genre in movie.genres %}
-                    <span class="genre-tag">{{ genre }}</span>
-                    {% endfor %}
-                </div>
-                
-                <p class="overview">{{ movie.overview }}</p>
-                
-                <div class="actions">
-                    <button class="btn btn-primary" onclick="toggleFavorite({{ movie.id }}, '{{ movie.title }}')">
-                        {% if is_favorite %}❤️ Remove from Favorites{% else %}🤍 Add to Favorites{% endif %}
-                    </button>
-                    <a href="/recommendations" class="btn btn-secondary">🎯 Get Similar Movies</a>
-                </div>
             </div>
         </div>
         
-        {% if similar %}
-        <div class="section">
-            <h2 class="section-title">Similar Movies You Might Like</h2>
-            <div class="similar-grid">
-                {% for movie in similar %}
-                <div class="similar-card" onclick="location.href='/movie/{{ movie.id }}'">
-                    {% if movie.poster_path %}
-                    <img src="{{ movie.poster_path }}" alt="{{ movie.title }}" class="similar-poster">
-                    {% else %}
-                    <div class="similar-poster" style="display: flex; align-items: center; justify-content: center;">
-                        🎬
-                    </div>
-                    {% endif %}
-                    <div class="similar-title">
-                        {{ movie.title }}
-                        <span style="display: block; font-size: 0.9rem; color: #ffd93d;">
-                            ⭐ {{ "%.1f"|format(movie.vote_average) if movie.vote_average else 'N/A' }}
-                        </span>
-                    </div>
-                </div>
-                {% endfor %}
+        <h1>🎯 AI-Powered Recommendations</h1>
+        
+        <div class="movies-grid">
+            {% for movie in movies %}
+            <div class="movie-card">
+                <div class="movie-poster">{{ movie.poster }}</div>
+                <div class="movie-title">{{ movie.title }}</div>
+                <div>{{ movie.year }} • ⭐ {{ movie.rating }}</div>
+                <button class="btn" onclick="addToFavorites({{ movie.id }}, '{{ movie.title }}')">
+                    💖 Save
+                </button>
             </div>
+            {% endfor %}
         </div>
-        {% endif %}
+        
+        <a href="/" class="back-btn">← Back to Home</a>
     </div>
     
     <script>
-        function toggleFavorite(movieId, movieTitle) {
+        function addToFavorites(movieId, movieTitle) {
             fetch('/add_favorite', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({movie_id: movieId, movie: movieTitle})
-            }).then(res => res.json()).then(data => {
+            })
+            .then(res => res.json())
+            .then(data => {
                 if (data.success) {
+                    alert(data.message);
+                } else {
+                    alert('Please login to save favorites');
+                    window.location.href = '/login';
+                }
+            });
+        }
+    </script>
+</body>
+</html>
+'''
+
+TRENDING_PAGE_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trending - X★STAR</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #0c0c0c 0%, #1a1a2e 50%, #16213e 100%);
+            color: white;
+            min-height: 100vh;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+        .header {
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+            padding: 1rem 0; 
+            margin-bottom: 2rem; 
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .logo { 
+            font-size: 2rem; 
+            font-weight: bold; 
+            background: linear-gradient(45deg, #ffd93d, #ff6b9d);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-decoration: none; 
+        }
+        h1 {
+            margin-bottom: 2rem;
+            background: linear-gradient(45deg, #ffd93d, #ff6b9d);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .movies-grid {
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1.5rem; 
+        }
+        .movie-card {
+            background: rgba(255,255,255,0.1); 
+            border-radius: 10px; 
+            padding: 1.5rem;
+            text-align: center;
+            transition: transform 0.3s ease; 
+            cursor: pointer;
+        }
+        .movie-card:hover { 
+            transform: translateY(-5px); 
+            box-shadow: 0 10px 30px rgba(255,217,61,0.2); 
+        }
+        .movie-poster { font-size: 3rem; margin-bottom: 1rem; }
+        .movie-title { 
+            font-size: 1.1rem; 
+            font-weight: bold; 
+            margin-bottom: 0.5rem;
+            color: #ffd93d;
+        }
+        .trending-badge {
+            display: inline-block;
+            background: linear-gradient(45deg, #ffd93d, #ff6b9d);
+            padding: 0.2rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            margin-top: 0.5rem;
+            color: #0c0c0c;
+            font-weight: bold;
+        }
+        .btn {
+            background: rgba(255,107,157,0.3);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            color: white;
+            cursor: pointer;
+            margin-top: 0.5rem;
+        }
+        .btn:hover { background: rgba(255,107,157,0.6); }
+        .back-btn {
+            display: inline-block;
+            margin-top: 2rem;
+            color: #ffd93d;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <a href="/" class="logo">X★STAR</a>
+            <div>
+                {% if session.user %}
+                    <span>👤 {{ session.user }}</span>
+                {% else %}
+                    <a href="/login" style="color: #ffd93d;">Login</a>
+                {% endif %}
+            </div>
+        </div>
+        
+        <h1>🔥 Trending Now</h1>
+        
+        <div class="movies-grid">
+            {% for movie in movies %}
+            <div class="movie-card">
+                <div class="movie-poster">{{ movie.poster }}</div>
+                <div class="movie-title">{{ movie.title }}</div>
+                <div>{{ movie.year }} • ⭐ {{ movie.rating }}</div>
+                <span class="trending-badge">🔥 HOT</span>
+                <button class="btn" onclick="addToFavorites({{ movie.id }}, '{{ movie.title }}')">
+                    💖 Save
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <a href="/" class="back-btn">← Back to Home</a>
+    </div>
+    
+    <script>
+        function addToFavorites(movieId, movieTitle) {
+            fetch('/add_favorite', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({movie_id: movieId, movie: movieTitle})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    alert(data.message);
+                } else {
+                    alert('Please login to save favorites');
+                    window.location.href = '/login';
+                }
+            });
+        }
+    </script>
+</body>
+</html>
+'''
+
+FAVORITES_PAGE_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Favorites - X★STAR</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #0c0c0c 0%, #1a1a2e 50%, #16213e 100%);
+            color: white;
+            min-height: 100vh;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+        .header {
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+            padding: 1rem 0; 
+            margin-bottom: 2rem; 
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .logo { 
+            font-size: 2rem; 
+            font-weight: bold; 
+            background: linear-gradient(45deg, #ff6b9d, #00d4ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-decoration: none; 
+        }
+        h1 {
+            margin-bottom: 2rem;
+            background: linear-gradient(45deg, #ff6b9d, #00d4ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .movies-grid {
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1.5rem; 
+        }
+        .movie-card {
+            background: rgba(255,255,255,0.1); 
+            border-radius: 10px; 
+            padding: 1.5rem;
+            text-align: center;
+            transition: transform 0.3s ease; 
+        }
+        .movie-card:hover { 
+            transform: translateY(-5px); 
+            box-shadow: 0 10px 30px rgba(255,107,157,0.2); 
+        }
+        .movie-poster { font-size: 3rem; margin-bottom: 1rem; }
+        .movie-title { 
+            font-size: 1.1rem; 
+            font-weight: bold; 
+            margin-bottom: 0.5rem;
+            color: #ff6b9d;
+        }
+        .btn-remove {
+            background: rgba(231,76,60,0.3);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            color: white;
+            cursor: pointer;
+            margin-top: 0.5rem;
+        }
+        .btn-remove:hover { background: rgba(231,76,60,0.6); }
+        .back-btn {
+            display: inline-block;
+            margin-top: 2rem;
+            color: #ff6b9d;
+            text-decoration: none;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 4rem;
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <a href="/" class="logo">X★STAR</a>
+            <div>
+                <span>👤 {{ session.user }}</span>
+                <a href="/logout" style="color: #ff6b9d; margin-left: 1rem;">Logout</a>
+            </div>
+        </div>
+        
+        <h1>⭐ My Favorite Movies</h1>
+        
+        {% if favorites %}
+        <div class="movies-grid">
+            {% for fav in favorites %}
+            <div class="movie-card">
+                <div class="movie-poster">🎬</div>
+                <div class="movie-title">{{ fav.title }}</div>
+                <div style="font-size: 0.8rem; color: #aaa; margin-top: 0.5rem;">
+                    Added: {{ fav.added_at[:10] }}
+                </div>
+                <button class="btn-remove" onclick="removeFavorite({{ fav.movie_id }}, '{{ fav.title }}')">
+                    ❌ Remove
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <h2>No favorites yet! 🎬</h2>
+            <p>Start adding movies to your favorites list.</p>
+            <a href="/" style="display: inline-block; margin-top: 1rem; color: #ff6b9d;">Browse Movies →</a>
+        </div>
+        {% endif %}
+        
+        <a href="/" class="back-btn">← Back to Home</a>
+    </div>
+    
+    <script>
+        function removeFavorite(movieId, movieTitle) {
+            fetch('/add_favorite', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({movie_id: movieId, movie: movieTitle})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    alert(data.message);
                     location.reload();
                 }
             });
@@ -950,12 +1597,9 @@ MOVIE_DETAILS_TEMPLATE = """
     </script>
 </body>
 </html>
-"""
+'''
 
-# Additional templates (RECOMMENDATIONS_PAGE_TEMPLATE, MOVIES_PAGE_TEMPLATE, etc.) 
-# would follow the same pattern as above
-
-ERROR_PAGE_TEMPLATE = """
+ERROR_PAGE_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -974,12 +1618,28 @@ ERROR_PAGE_TEMPLATE = """
             text-align: center;
         }
         .error-container { padding: 2rem; }
-        .error-code { font-size: 8rem; font-weight: bold; color: #00d4ff; }
+        .error-code { 
+            font-size: 8rem; 
+            font-weight: bold; 
+            background: linear-gradient(45deg, #00d4ff, #ff6b9d);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
         .error-message { font-size: 2rem; margin: 1rem 0; }
         .btn {
-            display: inline-block; padding: 1rem 2rem; background: #00d4ff;
-            color: #0c0c0c; text-decoration: none; border-radius: 10px;
-            margin-top: 2rem; font-weight: bold;
+            display: inline-block; 
+            padding: 1rem 2rem; 
+            background: linear-gradient(45deg, #00d4ff, #ff6b9d);
+            color: white; 
+            text-decoration: none; 
+            border-radius: 10px;
+            margin-top: 2rem; 
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(0,212,255,0.3);
         }
     </style>
 </head>
@@ -991,76 +1651,10 @@ ERROR_PAGE_TEMPLATE = """
     </div>
 </body>
 </html>
-"""
+'''
 
-# ==================== Schema Definition ====================
-SCHEMA_SQL = """
--- schema.sql
-DROP TABLE IF EXISTS users;
-CREATE TABLE users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    email TEXT,
-    password_hash TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_login TIMESTAMP
-);
-
-DROP TABLE IF EXISTS favorites;
-CREATE TABLE favorites (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    movie_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users (id),
-    UNIQUE(user_id, movie_id)
-);
-
-DROP TABLE IF EXISTS watch_history;
-CREATE TABLE watch_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    movie_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    watched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users (id),
-    UNIQUE(user_id, movie_id, watched_at)
-);
-
-DROP TABLE IF EXISTS ratings;
-CREATE TABLE ratings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    movie_id INTEGER NOT NULL,
-    rating INTEGER CHECK (rating >= 1 AND rating <= 5),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users (id),
-    UNIQUE(user_id, movie_id)
-);
-
-CREATE INDEX idx_favorites_user ON favorites(user_id);
-CREATE INDEX idx_watch_history_user ON watch_history(user_id);
-CREATE INDEX idx_ratings_user ON ratings(user_id);
-"""
-
-# Write schema to file
-with open('schema.sql', 'w') as f:
-    f.write(SCHEMA_SQL)
-
-# ==================== Application Startup ====================
-def initialize_app():
-    """Initialize the application."""
-    # Create database if it doesn't exist
-    if not os.path.exists(app.config['DATABASE']):
-        init_db()
-        print("Database initialized.")
-    
-    # Check for TMDB API key
-    if not app.config['TMDB_API_KEY']:
-        print("Warning: TMDB_API_KEY not set. Real movie data won't be available.")
-        print("Get your free API key at: https://www.themoviedb.org/settings/api")
-
+# ==================== Run Application ====================
 if __name__ == '__main__':
-    initialize_app()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Get port from environment variable for Render
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
